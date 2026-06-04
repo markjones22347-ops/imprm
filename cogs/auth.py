@@ -242,7 +242,7 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
                 pass
 
         # Defer so we can send two follow-up messages
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        await interaction.response.defer(ephemeral=True)
 
         # ── Success message ───────────────────────────────────────────────────
         reg_view = ui.LayoutView()
@@ -259,7 +259,7 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
             ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             ui.TextDisplay("-# Imperium — Registration"),
         ))
-        await interaction.response.send_message(view=reg_view, ephemeral=True)
+        await interaction.followup.send(view=reg_view, ephemeral=True)
 
         # ── Getting started guide (second message) ────────────────────────────
         guide_view = ui.LayoutView()

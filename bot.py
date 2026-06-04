@@ -2,10 +2,17 @@ import discord
 from discord.ext import commands
 import os
 import sys
+
+# Ensure the project root is on sys.path so the cogs package can be imported.
+base_dir = os.path.dirname(os.path.abspath(__file__))
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
+
 from dotenv import load_dotenv
 from keep_alive import keep_alive
 
 load_dotenv()
+load_dotenv("render-env.txt", override=False)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
