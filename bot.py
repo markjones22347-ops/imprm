@@ -30,6 +30,7 @@ COGS = [
     "cogs.utility",
     "cogs.verification",
     "cogs.auth",
+    "cogs.products",
 ]
 
 

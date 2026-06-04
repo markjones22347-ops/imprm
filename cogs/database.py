@@ -145,6 +145,8 @@ def create_key(key: str, duration: str, generated_by: int) -> dict:
         "password_hash":      None,
         "hwid":               None,
         "registered_at":      None,
+        "products":           [],
+        "product_links":      {},
     }
     data["keys"][key] = record
     _save(data)
@@ -242,6 +244,7 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
     """
     Validates credentials and manages HWID binding.
     Returns (success, message).
+    Message is JSON for success: {"products": ["emu", "popup"], "links": {"emu": "url", ...}}
     """
     data = _load()
     for key, rec in data["keys"].items():
@@ -254,11 +257,71 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
                 # First launch — bind HWID
                 rec["hwid"] = hwid
                 _save(data)
-                return True, "OK"
+                # Return products on success
+                products = rec.get("products", [])
+                product_links = rec.get("product_links", {})
+                response = json.dumps({"products": products, "links": product_links})
+                return True, response
             elif rec["hwid"] != hwid:
                 return False, "HWID mismatch. Contact support to reset."
-            return True, "OK"
+            # Return products on success
+            products = rec.get("products", [])
+            product_links = rec.get("product_links", {})
+            response = json.dumps({"products": products, "links": product_links})
+            return True, response
     return False, "Username not found."
+
+# ─── Product Management ────────────────────────────────────────────────────────
+
+def assign_products_to_key(key: str, products: list[str]) -> bool:
+    """Assign a list of products to a key. Overwrites existing products."""
+    data = _load()
+    if key not in data["keys"]:
+        return False
+    data["keys"][key]["products"] = products
+    _save(data)
+    return True
+
+
+def set_product_link(key: str, product: str, download_url: str) -> bool:
+    """Set the download link for a specific product on a key."""
+    data = _load()
+    if key not in data["keys"]:
+        return False
+    if "product_links" not in data["keys"][key]:
+        data["keys"][key]["product_links"] = {}
+    data["keys"][key]["product_links"][product] = download_url
+    _save(data)
+    return True
+
+
+def get_products_for_key(key: str) -> dict:
+    """Get products and download links for a key. Returns {products: [...], links: {...}}"""
+    data = _load()
+    if key not in data["keys"]:
+        return {"products": [], "links": {}}
+    rec = data["keys"][key]
+    return {
+        "products": rec.get("products", []),
+        "links": rec.get("product_links", {})
+    }
+
+
+def remove_product_from_key(key: str, product: str) -> bool:
+    """Remove a product from a key's product list."""
+    data = _load()
+    if key not in data["keys"]:
+        return False
+    products = data["keys"][key].get("products", [])
+    if product in products:
+        products.remove(product)
+        data["keys"][key]["products"] = products
+        # Also remove the download link
+        if "product_links" in data["keys"][key] and product in data["keys"][key]["product_links"]:
+            del data["keys"][key]["product_links"][product]
+        _save(data)
+        return True
+    return False
 
 # ─── Download URL (stored in Gist, set via /setdownload) ─────────────────────
 
