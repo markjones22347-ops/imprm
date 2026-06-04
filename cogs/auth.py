@@ -132,12 +132,14 @@ class GenKeyModal(ui.Modal, title="Generate Key"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        print(f"[GenKeyModal] on_submit called by {interaction.user}", flush=True)
         custom = self.custom_key.value.strip().upper()
         try:
             qty = max(1, min(25, int(self.quantity.value.strip())))
         except ValueError:
             qty = 1
 
+        print(f"[GenKeyModal] custom={custom}, qty={qty}", flush=True)
         generated = []
         if custom:
             if qty != 1:
@@ -171,6 +173,7 @@ class GenKeyModal(ui.Modal, title="Generate Key"):
         note_line  = f"\n**Note:** {self.note.value.strip()}" if self.note.value.strip() else ""
         keys_block = "\n".join(generated)
 
+        print(f"[GenKeyModal] generated {len(generated)} keys, sending response", flush=True)
         view = ui.LayoutView()
         view.add_item(ui.Container(
             ui.TextDisplay(f"## {'Key' if len(generated) == 1 else f'{len(generated)} Keys'} Generated"),
@@ -567,9 +570,11 @@ class AuthCog(commands.Cog):
 
     @app_commands.command(name="genkey", description="Generate one or more Imperium keys. (Admin)")
     async def genkey(self, interaction: discord.Interaction):
+        print(f"[genkey] called by {interaction.user}, is_founder={_is_founder(interaction.user)}", flush=True)
         if not _is_founder(interaction.user):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
+        print(f"[genkey] showing GenKeyModal", flush=True)
         await interaction.response.send_modal(GenKeyModal())
 
     @app_commands.command(name="disablekey", description="Disable a key. (Admin)")
