@@ -67,7 +67,17 @@ class ImperiumHandler(BaseHTTPRequestHandler):
         success, message = authenticate(username, password, hwid)
 
         status = 200 if success else 401
-        self._json_respond(status, {"success": success, "message": message})
+        
+        # If success and message is JSON (products), return it directly
+        # Otherwise wrap in standard response
+        if success and message.startswith("{"):
+            try:
+                products_data = json.loads(message)
+                self._json_respond(status, products_data)
+            except:
+                self._json_respond(status, {"success": success, "message": message})
+        else:
+            self._json_respond(status, {"success": success, "message": message})
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     def _respond(self, code: int, body: bytes, content_type: str):
