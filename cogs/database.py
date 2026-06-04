@@ -20,7 +20,8 @@ from typing import Optional
 
 GIST_ID      = os.getenv("GIST_ID", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GIST_FILENAME = "imperium_db.json"
+GIST_FILENAMES = ["imperium_db.json", "imprmdb.json"]
+GIST_FILENAME = GIST_FILENAMES[0]
 
 _HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
@@ -45,9 +46,10 @@ def _load() -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             gist = json.loads(resp.read().decode("utf-8"))
         files = gist.get("files", {})
-        if GIST_FILENAME not in files:
+        filename = next((name for name in GIST_FILENAMES if name in files), None)
+        if not filename:
             return {"keys": {}}
-        content = files[GIST_FILENAME].get("content", "{}")
+        content = files[filename].get("content", "{}")
         return json.loads(content)
     except Exception as e:
         print(f"[DB] _load error: {e}", flush=True)
@@ -59,9 +61,19 @@ def _save(data: dict):
     if not GIST_ID or not GITHUB_TOKEN:
         print("[DB] GIST_ID or GITHUB_TOKEN not set — skipping save.", flush=True)
         return
+    filename = None
+    try:
+        req = urllib.request.Request(_gist_url(), headers=_HEADERS, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            gist = json.loads(resp.read().decode("utf-8"))
+        files = gist.get("files", {})
+        filename = next((name for name in GIST_FILENAMES if name in files), GIST_FILENAME)
+    except Exception:
+        filename = GIST_FILENAME
+
     payload = json.dumps({
         "files": {
-            GIST_FILENAME: {
+            filename: {
                 "content": json.dumps(data, indent=2)
             }
         }
