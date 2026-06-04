@@ -134,6 +134,7 @@ def get_all_keys() -> dict:
 
 def create_key(key: str, duration: str, generated_by: int) -> dict:
     data = _load()
+    print(f"[DB] create_key loaded {len(data.get('keys', {}))} existing keys", flush=True)
     record = {
         "duration":           duration,
         "generated_by":       generated_by,
@@ -147,6 +148,7 @@ def create_key(key: str, duration: str, generated_by: int) -> dict:
     }
     data["keys"][key] = record
     _save(data)
+    print(f"[DB] create_key saved, now {len(data.get('keys', {}))} keys total", flush=True)
     return record
 
 
