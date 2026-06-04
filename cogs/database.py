@@ -50,8 +50,11 @@ def _load() -> dict:
         if not filename:
             if len(files) == 1:
                 filename = next(iter(files))
+                print(f"[DB] _load using single gist file: {filename}", flush=True)
             else:
                 return {"keys": {}}
+        else:
+            print(f"[DB] _load using configured gist file: {filename}", flush=True)
         content = files[filename].get("content", "{}")
         return json.loads(content)
     except Exception as e:
@@ -76,6 +79,7 @@ def _save(data: dict):
     except Exception:
         filename = GIST_FILENAME
 
+    print(f"[DB] _save using gist file: {filename}", flush=True)
     payload = json.dumps({
         "files": {
             filename: {
