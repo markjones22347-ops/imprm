@@ -23,6 +23,12 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GIST_FILENAMES = ["imperium_db.json", "imprmdb.json"]
 GIST_FILENAME = GIST_FILENAMES[0]
 
+print(
+    f"[DB] GIST_ID set: {bool(GIST_ID)}, GITHUB_TOKEN set: {bool(GITHUB_TOKEN)}, "
+    f"supported filenames: {GIST_FILENAMES}",
+    flush=True,
+)
+
 _HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "Accept":        "application/vnd.github+json",
@@ -40,6 +46,7 @@ def _gist_url() -> str:
 def _load() -> dict:
     """Fetch the current DB from the Gist. Returns empty schema on any error."""
     if not GIST_ID or not GITHUB_TOKEN:
+        print("[DB] _load missing GIST_ID or GITHUB_TOKEN", flush=True)
         return {"keys": {}}
     try:
         req = urllib.request.Request(_gist_url(), headers=_HEADERS, method="GET")
