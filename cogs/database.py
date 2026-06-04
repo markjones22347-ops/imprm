@@ -48,7 +48,10 @@ def _load() -> dict:
         files = gist.get("files", {})
         filename = next((name for name in GIST_FILENAMES if name in files), None)
         if not filename:
-            return {"keys": {}}
+            if len(files) == 1:
+                filename = next(iter(files))
+            else:
+                return {"keys": {}}
         content = files[filename].get("content", "{}")
         return json.loads(content)
     except Exception as e:
@@ -67,7 +70,9 @@ def _save(data: dict):
         with urllib.request.urlopen(req, timeout=10) as resp:
             gist = json.loads(resp.read().decode("utf-8"))
         files = gist.get("files", {})
-        filename = next((name for name in GIST_FILENAMES if name in files), GIST_FILENAME)
+        filename = next((name for name in GIST_FILENAMES if name in files), None)
+        if not filename:
+            filename = next(iter(files), GIST_FILENAME)
     except Exception:
         filename = GIST_FILENAME
 
