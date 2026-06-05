@@ -5,6 +5,8 @@ All data lives in a single private GitHub Gist as a JSON file.
 Set these in your environment / Render dashboard:
   GIST_ID          — the ID of your private gist (from the URL)
   GITHUB_TOKEN     — a personal access token with the `gist` scope
+  GITHUB_REPO      — owner/repo for Release hosting, e.g. "markjones22347-ops/imprm"
+                     (used by /sethookloaderdll to host the DLL as a Release asset)
 
 The gist must contain a single file named `imperium_db.json`.
 """
@@ -19,12 +21,13 @@ from typing import Optional
 
 GIST_ID      = os.getenv("GIST_ID", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO  = os.getenv("GITHUB_REPO", "markjones22347-ops/imprm")
 GIST_FILENAMES = ["imperium_db.json", "imprmdb.json"]
 GIST_FILENAME  = GIST_FILENAMES[0]
 
 print(
     f"[DB] GIST_ID set: {bool(GIST_ID)}, GITHUB_TOKEN set: {bool(GITHUB_TOKEN)}, "
-    f"supported filenames: {GIST_FILENAMES}",
+    f"GITHUB_REPO: {GITHUB_REPO}, supported filenames: {GIST_FILENAMES}",
     flush=True,
 )
 
@@ -43,10 +46,8 @@ DEFAULT_PRODUCTS: dict[str, dict] = {
     "popup":     {"display_name": "Popup Bypass",    "url": ""},
     "valorant":  {"display_name": "Valorant",        "url": ""},
     "csgo":      {"display_name": "CS:GO",           "url": ""},
+    "private":   {"display_name": "Private",         "url": ""},
 }
-
-
-# ─── Gist I/O ─────────────────────────────────────────────────────────────────
 
 def _gist_url() -> str:
     return f"https://api.github.com/gists/{GIST_ID}"
@@ -262,7 +263,12 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
     """
     Validates credentials and manages HWID binding.
     Returns (success, message).
-    On success message is JSON: {"products": [...], "links": {...}}
+    On success message is JSON:
+      {
+        "products": ["private", ...],
+        "links":    {"private": "https://...", ...},
+        "display_names": {"private": "Private", ...}
+      }
     Per-product links fall back to the global product catalogue URL if not
     set on the key directly.
     """
@@ -282,14 +288,19 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
                 return False, "HWID mismatch. Contact support to reset."
 
             products = rec.get("products", [])
-            # Build links: per-key override, else fall back to global catalogue URL
             product_links: dict[str, str] = {}
+            display_names: dict[str, str] = {}
             for p in products:
                 per_key_url = rec.get("product_links", {}).get(p, "")
                 global_url  = catalogue.get(p, {}).get("url", "")
                 product_links[p] = per_key_url or global_url
+                display_names[p] = catalogue.get(p, {}).get("display_name", p)
 
-            response = json.dumps({"products": products, "links": product_links})
+            response = json.dumps({
+                "products":      products,
+                "links":         product_links,
+                "display_names": display_names,
+            })
             return True, response
 
     return False, "Username not found."
@@ -411,3 +422,128 @@ async def set_download_url(url: str):
         data["products"]["imperium"] = {"display_name": "Imperium", "url": ""}
     data["products"]["imperium"]["url"] = url
     _save(data)
+
+
+# ─── GitHub Release asset hosting (for /sethookloaderdll) ────────────────────
+#
+# Flow:
+#   1. Look for a Release tagged "hookloader-dll" in GITHUB_REPO.
+#   2. If it exists, delete the old "private.dll" asset (if any) and upload
+#      the new bytes as "private.dll".
+#   3. If no release exists, create it first.
+#   4. The resulting browser_download_url is stored as the global URL for the
+#      "private" product slug, so the hookloader auto-downloads it.
+#
+# Requires GITHUB_TOKEN to have  repo  scope (releases + assets).
+
+_RELEASE_TAG  = "hookloader-dll"
+_RELEASE_NAME = "Hookloader DLL (managed by bot)"
+_DLL_ASSET    = "private.dll"
+
+
+def _gh_api(path: str, method: str = "GET",
+            data: bytes | None = None,
+            content_type: str = "application/json") -> dict | None:
+    """Simple wrapper for GitHub REST API calls. Returns parsed JSON or None."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}{path}"
+    headers = dict(_HEADERS)
+    headers["Content-Type"] = content_type
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"[GH] {method} {path} → HTTP {e.code}: {body[:300]}", flush=True)
+        return None
+    except Exception as ex:
+        print(f"[GH] {method} {path} error: {ex}", flush=True)
+        return None
+
+
+def _get_or_create_release() -> dict | None:
+    """Return the hookloader-dll Release object, creating it if needed."""
+    # Try to fetch by tag
+    rel = _gh_api(f"/releases/tags/{_RELEASE_TAG}")
+    if rel and "id" in rel:
+        return rel
+
+    # Create it
+    payload = json.dumps({
+        "tag_name":   _RELEASE_TAG,
+        "name":       _RELEASE_NAME,
+        "body":       "Auto-managed by Imperium Bot. Do not edit manually.",
+        "draft":      False,
+        "prerelease": False,
+    }).encode()
+    rel = _gh_api("/releases", method="POST", data=payload)
+    if rel and "id" in rel:
+        print(f"[GH] Created release id={rel['id']}", flush=True)
+        return rel
+    return None
+
+
+def upload_hookloader_dll(dll_bytes: bytes) -> tuple[bool, str]:
+    """
+    Upload dll_bytes as private.dll to the hookloader-dll GitHub Release.
+    Returns (success, download_url_or_error_message).
+    On success also updates the 'private' product global URL in the Gist.
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN or GITHUB_REPO not configured."
+
+    rel = _get_or_create_release()
+    if not rel:
+        return False, "Failed to get or create the GitHub Release."
+
+    release_id = rel["id"]
+
+    # Delete existing asset with the same name if present
+    assets = _gh_api(f"/releases/{release_id}/assets") or []
+    for asset in assets:
+        if isinstance(asset, dict) and asset.get("name") == _DLL_ASSET:
+            _gh_api(f"/assets/{asset['id']}", method="DELETE")
+            print(f"[GH] Deleted old asset id={asset['id']}", flush=True)
+            break
+
+    # Upload new asset via upload_url
+    # upload_url template looks like: https://uploads.github.com/repos/.../assets{?name,label}
+    upload_url = rel.get("upload_url", "").split("{")[0]
+    if not upload_url:
+        return False, "Release has no upload_url."
+
+    upload_full = f"{upload_url}?name={_DLL_ASSET}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Content-Type":  "application/octet-stream",
+        "Accept":        "application/vnd.github+json",
+        "User-Agent":    "ImperiumBot/1.0",
+    }
+    req = urllib.request.Request(
+        upload_full, data=dll_bytes, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            asset_info = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")
+        return False, f"Upload failed (HTTP {e.code}): {err[:200]}"
+    except Exception as ex:
+        return False, f"Upload error: {ex}"
+
+    download_url = asset_info.get("browser_download_url", "")
+    if not download_url:
+        return False, "Upload succeeded but no download URL returned."
+
+    # Persist the new URL as the global "private" product URL
+    data = _load()
+    if "products" not in data:
+        data["products"] = DEFAULT_PRODUCTS.copy()
+    if "private" not in data["products"]:
+        data["products"]["private"] = {"display_name": "Private", "url": ""}
+    data["products"]["private"]["url"] = download_url
+    _save(data)
+
+    print(f"[GH] DLL uploaded: {download_url}", flush=True)
+    return True, download_url
