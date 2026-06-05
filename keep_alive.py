@@ -20,10 +20,21 @@ import json
 
 class ImperiumHandler(BaseHTTPRequestHandler):
 
-    # ── GET / ─────────────────────────────────────────────────────────────────
+    # ── GET /products/<slug> ──────────────────────────────────────────────────
     def do_GET(self):
         if self.path == "/":
             self._respond(200, b"OK", "text/plain")
+        elif self.path.startswith("/products/"):
+            slug = self.path[len("/products/"):]
+            from cogs.database import get_all_products
+            products = get_all_products()
+            info = products.get(slug)
+            if info:
+                url = info.get("url", "")
+                body = json.dumps({"slug": slug, "url": url}).encode("utf-8")
+                self._respond(200, body, "application/json")
+            else:
+                self._respond(404, b'{"error":"not found"}', "application/json")
         else:
             self._respond(404, b"Not Found", "text/plain")
 
@@ -33,7 +44,9 @@ class ImperiumHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
 
-    # ── POST /auth ────────────────────────────────────────────────────────────
+    def log_message(self, format, *args):
+        if self.path not in ("/", "") and not self.path.startswith("/products/"):
+            print(f"[HTTP] {self.address_string()} — {format % args}", flush=True)
     def do_POST(self):
         if self.path != "/auth":
             self._respond(404, b"Not Found", "text/plain")
