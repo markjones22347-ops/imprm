@@ -7,7 +7,6 @@ Set these in your environment / Render dashboard:
   GITHUB_TOKEN     — a personal access token with the `gist` scope
 
 The gist must contain a single file named `imperium_db.json`.
-If the file doesn't exist yet, the first write will create it.
 """
 
 import json
@@ -21,7 +20,7 @@ from typing import Optional
 GIST_ID      = os.getenv("GIST_ID", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GIST_FILENAMES = ["imperium_db.json", "imprmdb.json"]
-GIST_FILENAME = GIST_FILENAMES[0]
+GIST_FILENAME  = GIST_FILENAMES[0]
 
 print(
     f"[DB] GIST_ID set: {bool(GIST_ID)}, GITHUB_TOKEN set: {bool(GITHUB_TOKEN)}, "
@@ -36,6 +35,16 @@ _HEADERS = {
     "User-Agent":    "ImperiumBot/1.0",
 }
 
+# ─── Default product catalogue (seeded if absent from Gist) ──────────────────
+# Each entry: { "display_name": str, "url": str }
+DEFAULT_PRODUCTS: dict[str, dict] = {
+    "imperium":  {"display_name": "Imperium",       "url": ""},
+    "emu":       {"display_name": "Emu Bypass",      "url": ""},
+    "popup":     {"display_name": "Popup Bypass",    "url": ""},
+    "valorant":  {"display_name": "Valorant",        "url": ""},
+    "csgo":      {"display_name": "CS:GO",           "url": ""},
+}
+
 
 # ─── Gist I/O ─────────────────────────────────────────────────────────────────
 
@@ -47,7 +56,7 @@ def _load() -> dict:
     """Fetch the current DB from the Gist. Returns empty schema on any error."""
     if not GIST_ID or not GITHUB_TOKEN:
         print("[DB] _load missing GIST_ID or GITHUB_TOKEN", flush=True)
-        return {"keys": {}}
+        return _empty_schema()
     try:
         req = urllib.request.Request(_gist_url(), headers=_HEADERS, method="GET")
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -59,14 +68,27 @@ def _load() -> dict:
                 filename = next(iter(files))
                 print(f"[DB] _load using single gist file: {filename}", flush=True)
             else:
-                return {"keys": {}}
+                return _empty_schema()
         else:
             print(f"[DB] _load using configured gist file: {filename}", flush=True)
         content = files[filename].get("content", "{}")
-        return json.loads(content)
+        data = json.loads(content)
+        # Back-fill missing top-level keys
+        if "keys" not in data:
+            data["keys"] = {}
+        if "products" not in data:
+            data["products"] = DEFAULT_PRODUCTS.copy()
+        return data
     except Exception as e:
         print(f"[DB] _load error: {e}", flush=True)
-        return {"keys": {}}
+        return _empty_schema()
+
+
+def _empty_schema() -> dict:
+    return {
+        "keys": {},
+        "products": DEFAULT_PRODUCTS.copy(),
+    }
 
 
 def _save(data: dict):
@@ -205,10 +227,7 @@ def update_key(key: str, **kwargs) -> bool:
 
 
 def register_key(key: str, username: str, password: str, discord_id: int) -> tuple[bool, str]:
-    """
-    Claim a key for the first time.
-    Returns (success, error_message).
-    """
+    """Claim a key for the first time. Returns (success, error_message)."""
     data = _load()
     if key not in data["keys"]:
         return False, "Key not found."
@@ -217,7 +236,6 @@ def register_key(key: str, username: str, password: str, discord_id: int) -> tup
         return False, "This key has been disabled."
     if rec["claimed_by_discord"] is not None:
         return False, "This key has already been claimed."
-    # Enforce username uniqueness
     for v in data["keys"].values():
         if v.get("username") and v["username"].lower() == username.lower():
             return False, "That username is already taken."
@@ -244,9 +262,13 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
     """
     Validates credentials and manages HWID binding.
     Returns (success, message).
-    Message is JSON for success: {"products": ["emu", "popup"], "links": {"emu": "url", ...}}
+    On success message is JSON: {"products": [...], "links": {...}}
+    Per-product links fall back to the global product catalogue URL if not
+    set on the key directly.
     """
     data = _load()
+    catalogue = data.get("products", {})
+
     for key, rec in data["keys"].items():
         if rec.get("username") and rec["username"].lower() == username.lower():
             if rec["disabled"]:
@@ -254,24 +276,26 @@ def authenticate(username: str, password: str, hwid: str) -> tuple[bool, str]:
             if not verify_password(password, rec["password_hash"]):
                 return False, "Invalid password."
             if rec["hwid"] is None:
-                # First launch — bind HWID
                 rec["hwid"] = hwid
                 _save(data)
-                # Return products on success
-                products = rec.get("products", [])
-                product_links = rec.get("product_links", {})
-                response = json.dumps({"products": products, "links": product_links})
-                return True, response
             elif rec["hwid"] != hwid:
                 return False, "HWID mismatch. Contact support to reset."
-            # Return products on success
+
             products = rec.get("products", [])
-            product_links = rec.get("product_links", {})
+            # Build links: per-key override, else fall back to global catalogue URL
+            product_links: dict[str, str] = {}
+            for p in products:
+                per_key_url = rec.get("product_links", {}).get(p, "")
+                global_url  = catalogue.get(p, {}).get("url", "")
+                product_links[p] = per_key_url or global_url
+
             response = json.dumps({"products": products, "links": product_links})
             return True, response
+
     return False, "Username not found."
 
-# ─── Product Management ────────────────────────────────────────────────────────
+
+# ─── Per-key product management ───────────────────────────────────────────────
 
 def assign_products_to_key(key: str, products: list[str]) -> bool:
     """Assign a list of products to a key. Overwrites existing products."""
@@ -283,8 +307,8 @@ def assign_products_to_key(key: str, products: list[str]) -> bool:
     return True
 
 
-def set_product_link(key: str, product: str, download_url: str) -> bool:
-    """Set the download link for a specific product on a key."""
+def set_product_link_on_key(key: str, product: str, download_url: str) -> bool:
+    """Set a per-key download link override for a specific product."""
     data = _load()
     if key not in data["keys"]:
         return False
@@ -295,42 +319,95 @@ def set_product_link(key: str, product: str, download_url: str) -> bool:
     return True
 
 
+# Keep old name for compatibility
+def set_product_link(key: str, product: str, download_url: str) -> bool:
+    return set_product_link_on_key(key, product, download_url)
+
+
 def get_products_for_key(key: str) -> dict:
-    """Get products and download links for a key. Returns {products: [...], links: {...}}"""
+    """Returns {products: [...], links: {...}} for a key."""
     data = _load()
     if key not in data["keys"]:
         return {"products": [], "links": {}}
     rec = data["keys"][key]
     return {
         "products": rec.get("products", []),
-        "links": rec.get("product_links", {})
+        "links":    rec.get("product_links", {}),
     }
 
 
 def remove_product_from_key(key: str, product: str) -> bool:
-    """Remove a product from a key's product list."""
     data = _load()
     if key not in data["keys"]:
         return False
     products = data["keys"][key].get("products", [])
-    if product in products:
-        products.remove(product)
-        data["keys"][key]["products"] = products
-        # Also remove the download link
-        if "product_links" in data["keys"][key] and product in data["keys"][key]["product_links"]:
-            del data["keys"][key]["product_links"][product]
-        _save(data)
-        return True
-    return False
+    if product not in products:
+        return False
+    products.remove(product)
+    data["keys"][key]["products"] = products
+    links = data["keys"][key].get("product_links", {})
+    if product in links:
+        del links[product]
+        data["keys"][key]["product_links"] = links
+    _save(data)
+    return True
 
-# ─── Download URL (stored in Gist, set via /setdownload) ─────────────────────
+
+# ─── Global product catalogue ─────────────────────────────────────────────────
+
+def get_all_products() -> dict[str, dict]:
+    """
+    Returns the global product catalogue.
+    Schema: { slug: { display_name: str, url: str }, ... }
+    """
+    return _load().get("products", DEFAULT_PRODUCTS.copy())
+
+
+def upsert_product(slug: str, display_name: str, url: str) -> None:
+    """Add a new product or update an existing one in the catalogue."""
+    data = _load()
+    if "products" not in data:
+        data["products"] = DEFAULT_PRODUCTS.copy()
+    data["products"][slug] = {"display_name": display_name, "url": url}
+    _save(data)
+
+
+def delete_product(slug: str) -> bool:
+    """Remove a product from the global catalogue."""
+    data = _load()
+    if slug not in data.get("products", {}):
+        return False
+    del data["products"][slug]
+    _save(data)
+    return True
+
+
+def set_product_global_url(slug: str, url: str) -> bool:
+    """Update only the global URL for an existing product."""
+    data = _load()
+    if slug not in data.get("products", {}):
+        return False
+    data["products"][slug]["url"] = url
+    _save(data)
+    return True
+
+
+# ─── Legacy single download_url (kept for /download command) ─────────────────
 
 async def get_download_url() -> str:
     data = _load()
-    return data.get("download_url", "")
+    # Prefer the "imperium" product global URL, fall back to legacy field
+    imperium_url = data.get("products", {}).get("imperium", {}).get("url", "")
+    return imperium_url or data.get("download_url", "")
 
 
 async def set_download_url(url: str):
     data = _load()
     data["download_url"] = url
+    # Also sync to the imperium product catalogue entry
+    if "products" not in data:
+        data["products"] = DEFAULT_PRODUCTS.copy()
+    if "imperium" not in data["products"]:
+        data["products"]["imperium"] = {"display_name": "Imperium", "url": ""}
+    data["products"]["imperium"]["url"] = url
     _save(data)

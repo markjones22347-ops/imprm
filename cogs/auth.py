@@ -11,6 +11,7 @@ Admin commands (Founder role only):
   /showallkeys     — list every key with full details
   /hwidreset       — reset HWID binding on one or more keys
   /unclaim         — unclaim a key (wipes username/password/hwid, keeps key)
+  /setdownload     — open the full product download management panel
 
 Customer commands:
   /register        — claim a key and create login credentials (open to all)
@@ -30,13 +31,13 @@ from cogs.database import (
     disable_key, enable_key, delete_key, delete_keys,
     update_key, register_key, reset_hwid, key_exists,
     get_download_url, set_download_url,
+    get_all_products, upsert_product, delete_product, set_product_global_url,
 )
 
 # ─── Role IDs ─────────────────────────────────────────────────────────────────
 FOUNDER_ROLE_ID  = 1511851579446137003
 CUSTOMER_ROLE_ID = 1511852608858492938
 
-# IMPERIUM-XXXX-XXXX-XXXX = 8 + 1 + 4 + 1 + 4 + 1 + 4 = 23 chars
 KEY_PREFIX = "IMPERIUM"
 KEY_LENGTH = 23
 
@@ -68,7 +69,6 @@ def _fmt_ts(iso: str | None) -> str:
 
 
 def _validate_key_format(key: str) -> bool:
-    """IMPERIUM-XXXX-XXXX-XXXX — exactly 23 chars, correct structure."""
     parts = key.split("-")
     if len(parts) != 4:
         return False
@@ -79,28 +79,209 @@ def _validate_key_format(key: str) -> bool:
     return True
 
 
+def _build_product_panel_text() -> str:
+    """Build a text summary of all products for the panel embed."""
+    products = get_all_products()
+    if not products:
+        return "_No products configured yet. Use **Add Product** to create one._"
+    lines = []
+    for slug, info in products.items():
+        name = info.get("display_name", slug)
+        url  = info.get("url", "")
+        url_display = f"[link]({url})" if url else "❌ _no link set_"
+        lines.append(f"• **{name}** (`{slug}`) — {url_display}")
+    return "\n".join(lines)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  Modals
+#  Download panel — the main /setdownload UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-class SetDownloadModal(ui.Modal, title="Set Download Link"):
-    url_input = ui.TextInput(
-        label="Download URL",
-        placeholder="https://example.com/imperium.rar",
-        style=discord.TextStyle.short,
-        max_length=500,
-    )
+class DownloadPanelView(ui.View):
+    """
+    Persistent ephemeral panel shown by /setdownload.
+    Buttons:
+      • Edit link for an existing product  (opens EditProductLinkModal)
+      • Add new product                    (opens AddProductModal)
+      • Remove a product                   (opens RemoveProductModal)
+      • Refresh panel                      (re-renders)
+    """
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    def _embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="📦  Product Download Manager",
+            description=(
+                "Manage the global product catalogue and their download links.\n"
+                "These links are sent to the loader when a user authenticates.\n"
+                "Per-key overrides can be set with `/addproducttokey`.\n\n"
+                + _build_product_panel_text()
+            ),
+            color=0x1E90FF,
+        )
+        embed.set_footer(text="Imperium Bot — Download Management")
+        return embed
+
+    @ui.button(label="✏️  Edit Link", style=discord.ButtonStyle.primary, row=0)
+    async def edit_link(self, interaction: discord.Interaction, button: ui.Button):
+        products = get_all_products()
+        if not products:
+            await interaction.response.send_message(
+                "No products exist yet. Add one first.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(EditProductLinkModal(list(products.keys())))
+
+    @ui.button(label="➕  Add Product", style=discord.ButtonStyle.success, row=0)
+    async def add_product(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AddProductModal(self))
+
+    @ui.button(label="🗑️  Remove Product", style=discord.ButtonStyle.danger, row=0)
+    async def remove_product_btn(self, interaction: discord.Interaction, button: ui.Button):
+        products = get_all_products()
+        if not products:
+            await interaction.response.send_message(
+                "No products exist yet.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(RemoveProductModal(list(products.keys()), self))
+
+    @ui.button(label="🔄  Refresh", style=discord.ButtonStyle.secondary, row=0)
+    async def refresh(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.edit_message(embed=self._embed(), view=self)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Modals triggered from the panel
+# ──────────────────────────────────────────────────────────────────────────────
+
+class EditProductLinkModal(ui.Modal, title="Edit Product Download Link"):
+    """Edit the global download URL for one product."""
+
+    def __init__(self, product_slugs: list[str]):
+        super().__init__()
+        slug_hint = " | ".join(product_slugs[:8])  # show up to 8 in placeholder
+        self.slug_input = ui.TextInput(
+            label="Product slug",
+            placeholder=slug_hint or "e.g. imperium",
+            style=discord.TextStyle.short,
+            max_length=50,
+        )
+        self.url_input = ui.TextInput(
+            label="Download URL",
+            placeholder="https://example.com/product.rar",
+            style=discord.TextStyle.short,
+            max_length=500,
+        )
+        self.add_item(self.slug_input)
+        self.add_item(self.url_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        url = self.url_input.value.strip()
+        slug = self.slug_input.value.strip().lower()
+        url  = self.url_input.value.strip()
+
         if not url.startswith("http"):
             await interaction.response.send_message("❌ Invalid URL.", ephemeral=True)
             return
-        await set_download_url(url)
-        await interaction.response.send_message(
-            f"✅ Download link updated.\n`{url}`", ephemeral=True
-        )
 
+        products = get_all_products()
+        if slug not in products:
+            await interaction.response.send_message(
+                f"❌ Product `{slug}` not found. Use **Add Product** to create it first.",
+                ephemeral=True,
+            )
+            return
+
+        set_product_global_url(slug, url)
+
+        # Also keep legacy download_url in sync if editing imperium
+        if slug == "imperium":
+            import asyncio
+            asyncio.create_task(set_download_url(url))
+
+        # Refresh panel
+        view = DownloadPanelView()
+        await interaction.response.edit_message(embed=view._embed(), view=view)
+
+
+class AddProductModal(ui.Modal, title="Add / Update Product"):
+    """Add a new product (or overwrite an existing one) in the catalogue."""
+
+    slug_input = ui.TextInput(
+        label="Slug (internal ID, lowercase)",
+        placeholder="e.g.  valorant2  or  popup_v2",
+        style=discord.TextStyle.short,
+        max_length=50,
+    )
+    name_input = ui.TextInput(
+        label="Display Name",
+        placeholder="e.g.  Valorant v2  or  Popup Bypass v2",
+        style=discord.TextStyle.short,
+        max_length=80,
+    )
+    url_input = ui.TextInput(
+        label="Download URL (leave blank to set later)",
+        placeholder="https://example.com/product.rar",
+        style=discord.TextStyle.short,
+        max_length=500,
+        required=False,
+    )
+
+    def __init__(self, panel: "DownloadPanelView"):
+        super().__init__()
+        self._panel = panel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        slug = self.slug_input.value.strip().lower().replace(" ", "_")
+        name = self.name_input.value.strip()
+        url  = self.url_input.value.strip()
+
+        if not slug or not name:
+            await interaction.response.send_message(
+                "❌ Slug and display name are required.", ephemeral=True
+            )
+            return
+
+        if url and not url.startswith("http"):
+            await interaction.response.send_message("❌ Invalid URL.", ephemeral=True)
+            return
+
+        upsert_product(slug, name, url)
+
+        view = DownloadPanelView()
+        await interaction.response.edit_message(embed=view._embed(), view=view)
+
+
+class RemoveProductModal(ui.Modal, title="Remove Product"):
+    """Remove a product from the global catalogue."""
+
+    def __init__(self, product_slugs: list[str], panel: "DownloadPanelView"):
+        super().__init__()
+        slug_hint = " | ".join(product_slugs[:8])
+        self.slug_input = ui.TextInput(
+            label="Product slug to remove",
+            placeholder=slug_hint or "e.g. csgo",
+            style=discord.TextStyle.short,
+            max_length=50,
+        )
+        self._panel = panel
+        self.add_item(self.slug_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        slug = self.slug_input.value.strip().lower()
+        if delete_product(slug):
+            view = DownloadPanelView()
+            await interaction.response.edit_message(embed=view._embed(), view=view)
+        else:
+            await interaction.response.send_message(
+                f"❌ Product `{slug}` not found.", ephemeral=True
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Other modals (unchanged from before)
+# ══════════════════════════════════════════════════════════════════════════════
 
 class GenKeyModal(ui.Modal, title="Generate Key"):
     custom_key = ui.TextInput(
@@ -139,7 +320,6 @@ class GenKeyModal(ui.Modal, title="Generate Key"):
         except ValueError:
             qty = 1
 
-        print(f"[GenKeyModal] custom={custom}, qty={qty}", flush=True)
         generated = []
         if custom:
             if qty != 1:
@@ -159,7 +339,6 @@ class GenKeyModal(ui.Modal, title="Generate Key"):
                     f"❌ Key `{custom}` already exists.", ephemeral=True,
                 )
                 return
-
             create_key(custom, self.duration.value.strip(), interaction.user.id)
             generated.append(custom)
         else:
@@ -173,7 +352,6 @@ class GenKeyModal(ui.Modal, title="Generate Key"):
         note_line  = f"\n**Note:** {self.note.value.strip()}" if self.note.value.strip() else ""
         keys_block = "\n".join(generated)
 
-        print(f"[GenKeyModal] generated {len(generated)} keys, sending response", flush=True)
         view = ui.LayoutView()
         view.add_item(ui.Container(
             ui.TextDisplay(f"## {'Key' if len(generated) == 1 else f'{len(generated)} Keys'} Generated"),
@@ -194,7 +372,7 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
         label="Your Key",
         placeholder="IMPERIUM-XXXX-XXXX-XXXX",
         style=discord.TextStyle.short,
-        max_length=KEY_LENGTH,   # exactly 23
+        max_length=KEY_LENGTH,
     )
     username_input = ui.TextInput(
         label="Username",
@@ -214,7 +392,6 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
         username = self.username_input.value.strip()
         password = self.password_input.value.strip()
 
-        # Validate format before hitting the DB
         if not _validate_key_format(key):
             await interaction.response.send_message(
                 f"❌ Invalid key format. Keys must look like `{KEY_PREFIX}-XXXX-XXXX-XXXX`.",
@@ -236,7 +413,6 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
             )
             return
 
-        # Assign Customer role on success
         customer_role = interaction.guild.get_role(CUSTOMER_ROLE_ID)
         if customer_role and customer_role not in interaction.user.roles:
             try:
@@ -244,10 +420,8 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
             except discord.Forbidden:
                 pass
 
-        # Defer so we can send two follow-up messages
         await interaction.response.defer(ephemeral=True, thinking=False)
 
-        # ── Success message ───────────────────────────────────────────────────
         reg_view = ui.LayoutView()
         reg_view.add_item(ui.Container(
             ui.TextDisplay("## ✅ Registration Successful"),
@@ -264,7 +438,6 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
         ))
         await interaction.response.send_message(view=reg_view, ephemeral=True)
 
-        # ── Getting started guide (second message) ────────────────────────────
         guide_view = ui.LayoutView()
         guide_view.add_item(ui.Container(
             ui.TextDisplay("## 📖 Getting Started with Imperium"),
@@ -273,22 +446,15 @@ class RegisterModal(ui.Modal, title="Register — Claim Your Key"):
                 "**Step 1 — Download**\n"
                 "Use `/download` to get the latest `Loader.exe`.\n\n"
                 "**Step 2 — Run the Loader**\n"
-                "Open `Loader.exe`. A console window will appear.\n"
-                "Enter your **username** and **password** when prompted.\n\n"
-                "**Step 3 — Launch Roblox**\n"
-                "Make sure Roblox (`RobloxPlayerBeta.exe`) is already running before or after you log in — the loader will find it automatically.\n\n"
+                "Open `Loader.exe`. Enter your **username** and **password** when prompted.\n\n"
+                "**Step 3 — Launch the Game**\n"
+                "Make sure the game is running before or after you log in.\n\n"
                 "**Step 4 — Open the Menu**\n"
-                "Press **INSERT** to open/close the Imperium menu overlay.\n"
-                "The menu appears on top of your Roblox window.\n\n"
-                "**Step 5 — Using Features**\n"
-                "• **Aimbot / Silent Aim** — enable and set a keybind to activate\n"
-                "• **Visuals (ESP)** — toggle boxes, names, health bars under the Visuals tab\n"
-                "• **Rage** — hitbox expander, rapidfire, hitsounds, etc.\n"
-                "• **Movement** — speedhack and flyhack with keybind support\n"
-                "• **Settings** — change theme color, save/load configs, toggle watermark\n\n"
+                "Press **INSERT** to open/close the overlay menu.\n\n"
                 "**HWID Binding**\n"
-                "Your hardware ID binds automatically on first launch. If you change PC, ask an admin to use `/hwidreset` with your key.\n\n"
-                "**Need help?** Open a support ticket with `/ticket` or ask in the support channel."
+                "Your hardware ID binds automatically on first launch. "
+                "If you change PC, ask an admin to use `/hwidreset` with your key.\n\n"
+                "**Need help?** Open a support ticket with `/ticket`."
             ),
             ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             ui.TextDisplay("-# Imperium — Getting Started Guide"),
@@ -337,8 +503,8 @@ class BulkDeleteModal(ui.Modal, title="Bulk Delete Keys"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw            = self.keys_input.value.strip().splitlines()
-        keys           = [k.strip().upper() for k in raw if k.strip()]
+        raw   = self.keys_input.value.strip().splitlines()
+        keys  = [k.strip().upper() for k in raw if k.strip()]
         deleted, not_found = delete_keys(keys)
 
         lines = []
@@ -405,9 +571,8 @@ class ManageKeyModal(ui.Modal, title="Manage Key"):
         if kwargs:
             update_key(key, **kwargs)
 
-        rec         = get_key(key)
-        change_text = "\n".join(changes) if changes else "No changes made."
-
+        rec          = get_key(key)
+        change_text  = "\n".join(changes) if changes else "No changes made."
         gen_user     = "—"
         claimed_user = "—"
         if rec.get("generated_by"):
@@ -516,8 +681,7 @@ class HwidResetModal(ui.Modal, title="HWID Reset"):
             ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             ui.TextDisplay(
                 "\n\n".join(lines) + "\n\n"
-                "HWID unbound. Login credentials preserved.\n"
-                "HWID will re-bind on next launch."
+                "HWID unbound. Credentials preserved. Will re-bind on next launch."
             ),
             ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             ui.TextDisplay("-# Imperium Bot — Key Management"),
@@ -561,22 +725,29 @@ class AuthCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="setdownload", description="Set the download link for /download. (Admin)")
+    # ── /setdownload ──────────────────────────────────────────────────────────
+    @app_commands.command(
+        name="setdownload",
+        description="Open the product download management panel. (Admin)"
+    )
     async def setdownload(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        await interaction.response.send_modal(SetDownloadModal())
+        view  = DownloadPanelView()
+        embed = view._embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+    # ── /genkey ───────────────────────────────────────────────────────────────
     @app_commands.command(name="genkey", description="Generate one or more Imperium keys. (Admin)")
     async def genkey(self, interaction: discord.Interaction):
-        print(f"[genkey] called by {interaction.user}, is_founder={_is_founder(interaction.user)}", flush=True)
+        print(f"[genkey] called by {interaction.user}", flush=True)
         if not _is_founder(interaction.user):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
-        print(f"[genkey] showing GenKeyModal", flush=True)
         await interaction.response.send_modal(GenKeyModal())
 
+    # ── /disablekey ───────────────────────────────────────────────────────────
     @app_commands.command(name="disablekey", description="Disable a key. (Admin)")
     async def disablekey(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -584,6 +755,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(DisableKeyModal())
 
+    # ── /deletekey ────────────────────────────────────────────────────────────
     @app_commands.command(name="deletekey", description="Permanently delete a key. (Admin)")
     async def deletekey(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -591,6 +763,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(DeleteKeyModal())
 
+    # ── /bulkdeletekeys ───────────────────────────────────────────────────────
     @app_commands.command(name="bulkdeletekeys", description="Delete multiple keys at once. (Admin)")
     async def bulkdeletekeys(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -598,6 +771,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(BulkDeleteModal())
 
+    # ── /managekey ────────────────────────────────────────────────────────────
     @app_commands.command(name="managekey", description="View and edit a single key. (Admin)")
     async def managekey(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -605,6 +779,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(ManageKeyModal())
 
+    # ── /managekeys ───────────────────────────────────────────────────────────
     @app_commands.command(name="managekeys", description="Enable or disable multiple keys. (Admin)")
     async def managekeys(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -612,6 +787,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(ManageKeysModal())
 
+    # ── /showallkeys ──────────────────────────────────────────────────────────
     @app_commands.command(name="showallkeys", description="List all keys with full details. (Admin)")
     async def showallkeys(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -640,6 +816,7 @@ class AuthCog(commands.Cog):
 
             pw_raw     = rec.get("password_hash") or "—"
             pw_display = f"||{pw_raw}||" if pw_raw != "—" else "—"
+            products   = ", ".join(rec.get("products", [])) or "none"
 
             block = (
                 f"```\n"
@@ -650,6 +827,7 @@ class AuthCog(commands.Cog):
                 f"Claimed  : {claimed_user}\n"
                 f"Username : {rec.get('username') or '—'}\n"
                 f"HWID     : {rec.get('hwid') or 'unbound'}\n"
+                f"Products : {products}\n"
                 f"Reg'd    : {(rec.get('registered_at') or '—')[:19]}\n"
                 f"```\n"
                 f"Password (spoiler): {pw_display}\n"
@@ -673,6 +851,7 @@ class AuthCog(commands.Cog):
             ))
             await interaction.followup.send(view=view, ephemeral=True)
 
+    # ── /hwidreset ────────────────────────────────────────────────────────────
     @app_commands.command(name="hwidreset", description="Reset HWID binding on one or more keys. (Admin)")
     async def hwidreset(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -680,6 +859,7 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(HwidResetModal())
 
+    # ── /unclaim ──────────────────────────────────────────────────────────────
     @app_commands.command(name="unclaim", description="Unclaim a key so it can be registered again. (Admin)")
     async def unclaim(self, interaction: discord.Interaction):
         if not _is_founder(interaction.user):
@@ -687,12 +867,12 @@ class AuthCog(commands.Cog):
             return
         await interaction.response.send_modal(UnclaimKeyModal())
 
+    # ── /register ─────────────────────────────────────────────────────────────
     @app_commands.command(name="register", description="Claim your key and create your loader account.")
     async def register(self, interaction: discord.Interaction):
-        # No role gate — the key itself is the only requirement.
-        # Founders can also register if they want a loader account.
         await interaction.response.send_modal(RegisterModal())
 
+    # ── /download ─────────────────────────────────────────────────────────────
     @app_commands.command(name="download", description="Get the Imperium download link.")
     async def download(self, interaction: discord.Interaction):
         if not _is_customer(interaction.user):
@@ -716,7 +896,7 @@ class AuthCog(commands.Cog):
             ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
             ui.TextDisplay(
                 f"[**Download Latest Version**]({url})\n\n"
-                f"Extract the `.rar` and run `Loader.exe`.\n"
+                f"Extract the archive and run `Loader.exe`.\n"
                 f"Log in with your **username** and **password**.\n"
                 f"Your HWID binds automatically on first launch.\n\n"
                 f"-# Do not share this link."
