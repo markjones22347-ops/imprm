@@ -11,12 +11,11 @@ Admin commands (Founder role only):
   /showallkeys        — list every key with full details
   /hwidreset          — reset HWID on one or more keys
   /unclaim            — unclaim a key (wipes credentials, keeps key)
-  /setdownload        — open the full product download management panel
-  /sethookloaderdll   — upload a new .dll for the hookloader (file or URL)
+  /setdownload        — manage product catalogue + download links
+  /sethookloaderdll   — upload a new internal DLL for the hookloader
 
 Customer commands:
   /register           — claim a key and create loader credentials
-  /download           — get the Imperium download link
 """
 
 import asyncio
@@ -31,7 +30,6 @@ from cogs.database import (
     create_key, get_key, get_all_keys,
     disable_key, enable_key, delete_key, delete_keys,
     update_key, register_key, reset_hwid, key_exists,
-    get_download_url, set_download_url,
     get_all_products, upsert_product, delete_product, set_product_global_url,
     upload_hookloader_dll,
 )
@@ -58,10 +56,6 @@ def _gen_key() -> str:
 
 def _is_founder(member: discord.Member) -> bool:
     return any(r.id == FOUNDER_ROLE_ID for r in member.roles)
-
-
-def _is_customer(member: discord.Member) -> bool:
-    return any(r.id == CUSTOMER_ROLE_ID for r in member.roles)
 
 
 def _validate_key_format(key: str) -> bool:
@@ -757,34 +751,6 @@ class AuthCog(commands.Cog):
     @app_commands.command(name="register", description="Claim your key and create your loader account.")
     async def register(self, interaction: discord.Interaction):
         await interaction.response.send_modal(RegisterModal())
-
-    # ── /download ─────────────────────────────────────────────────────────────
-    @app_commands.command(name="download", description="Get the Imperium download link.")
-    async def download(self, interaction: discord.Interaction):
-        if not _is_customer(interaction.user):
-            await interaction.response.send_message(
-                "Register first with `/register`.", ephemeral=True
-            )
-            return
-        url = await get_download_url()
-        if not url:
-            await interaction.response.send_message(
-                "Download link not set yet. Contact an admin.", ephemeral=True
-            )
-            return
-        view = ui.LayoutView()
-        view.add_item(ui.Container(
-            ui.TextDisplay("## Download Imperium"),
-            ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
-            ui.TextDisplay(
-                f"[**Download Latest Version**]({url})\n\n"
-                f"Extract and run `Loader.exe`. Log in with your username and password.\n"
-                f"HWID binds on first launch.\n\n-# Do not share this link."
-            ),
-            ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
-            ui.TextDisplay("-# Imperium — Download"),
-        ))
-        await interaction.response.send_message(view=view, ephemeral=True)
 
     # ── on_message — picks up .dll file uploads ───────────────────────────────
     @commands.Cog.listener()
