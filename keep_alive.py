@@ -24,6 +24,13 @@ class ImperiumHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/":
             self._respond(200, b"OK", "text/plain")
+        elif self.path == "/dll":
+            # Hookloader endpoint — returns the internal DLL download URL
+            from cogs.database import _load
+            data = _load()
+            dll_url = data.get("hookloader_dll_url", "")
+            body = json.dumps({"url": dll_url}).encode("utf-8")
+            self._respond(200, body, "application/json")
         elif self.path.startswith("/products/"):
             slug = self.path[len("/products/"):]
             from cogs.database import get_all_products

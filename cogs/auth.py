@@ -115,13 +115,12 @@ class HookloaderUrlModal(ui.Modal, title="Set Hookloader DLL URL"):
         if not url.startswith("http"):
             await interaction.response.send_message("❌ Invalid URL.", ephemeral=True)
             return
-        products = get_all_products()
-        if "private" not in products:
-            upsert_product("private", "Private", url)
-        else:
-            set_product_global_url("private", url)
+        from cogs.database import _load, _save
+        data = _load()
+        data["hookloader_dll_url"] = url
+        _save(data)
         await interaction.response.send_message(
-            f"✅ `private` product URL updated.\n`{url}`",
+            f"✅ Hookloader DLL URL updated.\n`{url}`",
             ephemeral=True,
         )
 

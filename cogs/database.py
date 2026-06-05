@@ -536,13 +536,9 @@ def upload_hookloader_dll(dll_bytes: bytes) -> tuple[bool, str]:
     if not download_url:
         return False, "Upload succeeded but no download URL returned."
 
-    # Persist the new URL as the global "private" product URL
+    # Persist the new URL as hookloader_dll_url (separate from the private product download link)
     data = _load()
-    if "products" not in data:
-        data["products"] = DEFAULT_PRODUCTS.copy()
-    if "private" not in data["products"]:
-        data["products"]["private"] = {"display_name": "Private", "url": ""}
-    data["products"]["private"]["url"] = download_url
+    data["hookloader_dll_url"] = download_url
     _save(data)
 
     print(f"[GH] DLL uploaded: {download_url}", flush=True)
