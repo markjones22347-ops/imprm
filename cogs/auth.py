@@ -767,15 +767,15 @@ class AuthCog(commands.Cog):
         if message.author.id != expected_user_id:
             return
 
-        # Look for a .dll attachment
+        # Look for any .dll or .exe attachment
         dll_attachment = next(
-            (a for a in message.attachments if a.filename.lower().endswith(".dll")),
+            (a for a in message.attachments
+             if a.filename.lower().endswith(('.dll', '.exe'))),
             None,
         )
         if not dll_attachment:
             return
 
-        # Consume the pending slot immediately so we don't double-process
         del _pending_dll_uploads[channel_id]
 
         status_msg = await message.reply(
@@ -788,10 +788,10 @@ class AuthCog(commands.Cog):
             await status_msg.edit(content=f"❌ Failed to read attachment: {e}")
             return
 
-        # Run the blocking upload in a thread so we don't block the event loop
         loop = asyncio.get_event_loop()
+        # Pass original filename so it isn't renamed
         success, result = await loop.run_in_executor(
-            None, upload_hookloader_dll, dll_bytes
+            None, lambda: upload_hookloader_dll(dll_bytes, dll_attachment.filename)
         )
 
         if success:

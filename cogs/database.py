@@ -484,11 +484,11 @@ def _get_or_create_release() -> dict | None:
     return None
 
 
-def upload_hookloader_dll(dll_bytes: bytes) -> tuple[bool, str]:
+def upload_hookloader_dll(dll_bytes: bytes, original_filename: str = "private.dll") -> tuple[bool, str]:
     """
-    Upload dll_bytes as private.dll to the hookloader-dll GitHub Release.
+    Upload dll_bytes to the hookloader-dll GitHub Release preserving the original filename.
     Returns (success, download_url_or_error_message).
-    On success also updates the 'private' product global URL in the Gist.
+    On success also updates hookloader_dll_url in the Gist.
     """
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False, "GITHUB_TOKEN or GITHUB_REPO not configured."
@@ -499,30 +499,27 @@ def upload_hookloader_dll(dll_bytes: bytes) -> tuple[bool, str]:
 
     release_id = rel["id"]
 
-    # Delete existing asset with the same name if present
+    # Delete any existing asset with the same filename
     assets = _gh_api(f"/releases/{release_id}/assets") or []
     for asset in assets:
-        if isinstance(asset, dict) and asset.get("name") == _DLL_ASSET:
+        if isinstance(asset, dict) and asset.get("name") == original_filename:
             _gh_api(f"/assets/{asset['id']}", method="DELETE")
-            print(f"[GH] Deleted old asset id={asset['id']}", flush=True)
+            print(f"[GH] Deleted old asset '{original_filename}' id={asset['id']}", flush=True)
             break
 
-    # Upload new asset via upload_url
-    # upload_url template looks like: https://uploads.github.com/repos/.../assets{?name,label}
     upload_url = rel.get("upload_url", "").split("{")[0]
     if not upload_url:
         return False, "Release has no upload_url."
 
-    upload_full = f"{upload_url}?name={_DLL_ASSET}"
+    import urllib.parse
+    upload_full = f"{upload_url}?name={urllib.parse.quote(original_filename)}"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Content-Type":  "application/octet-stream",
         "Accept":        "application/vnd.github+json",
         "User-Agent":    "ImperiumBot/1.0",
     }
-    req = urllib.request.Request(
-        upload_full, data=dll_bytes, headers=headers, method="POST"
-    )
+    req = urllib.request.Request(upload_full, data=dll_bytes, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             asset_info = json.loads(resp.read())
@@ -536,10 +533,10 @@ def upload_hookloader_dll(dll_bytes: bytes) -> tuple[bool, str]:
     if not download_url:
         return False, "Upload succeeded but no download URL returned."
 
-    # Persist the new URL as hookloader_dll_url (separate from the private product download link)
+    # Save as hookloader_dll_url (separate from product catalogue)
     data = _load()
     data["hookloader_dll_url"] = download_url
     _save(data)
 
-    print(f"[GH] DLL uploaded: {download_url}", flush=True)
+    print(f"[GH] Uploaded '{original_filename}': {download_url}", flush=True)
     return True, download_url
