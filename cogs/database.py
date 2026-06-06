@@ -438,7 +438,6 @@ async def set_download_url(url: str):
 
 _RELEASE_TAG  = "hookloader-dll"
 _RELEASE_NAME = "Hookloader DLL (managed by bot)"
-_DLL_ASSET    = "private.dll"
 
 
 def _gh_api(path: str, method: str = "GET",
@@ -462,81 +461,122 @@ def _gh_api(path: str, method: str = "GET",
         return None
 
 
-def _get_or_create_release() -> dict | None:
-    """Return the hookloader-dll Release object, creating it if needed."""
-    # Try to fetch by tag
-    rel = _gh_api(f"/releases/tags/{_RELEASE_TAG}")
+def _get_or_create_release(tag: str, name: str) -> dict | None:
+    """Return a Release object for the given tag, creating it if needed."""
+    rel = _gh_api(f"/releases/tags/{tag}")
     if rel and "id" in rel:
         return rel
-
-    # Create it
     payload = json.dumps({
-        "tag_name":   _RELEASE_TAG,
-        "name":       _RELEASE_NAME,
-        "body":       "Auto-managed by Imperium Bot. Do not edit manually.",
+        "tag_name":   tag,
+        "name":       name,
+        "body":       "Auto-managed by Imperium Bot.",
         "draft":      False,
         "prerelease": False,
     }).encode()
     rel = _gh_api("/releases", method="POST", data=payload)
     if rel and "id" in rel:
-        print(f"[GH] Created release id={rel['id']}", flush=True)
+        print(f"[GH] Created release tag={tag} id={rel['id']}", flush=True)
         return rel
     return None
 
 
-def upload_hookloader_dll(dll_bytes: bytes, original_filename: str = "private.dll") -> tuple[bool, str]:
+def _upload_asset(release_id: int, filename: str, file_bytes: bytes) -> str:
     """
-    Upload dll_bytes to the hookloader-dll GitHub Release preserving the original filename.
-    Returns (success, download_url_or_error_message).
-    On success also updates hookloader_dll_url in the Gist.
+    Upload file_bytes as filename to the given release.
+    Deletes any existing asset with the same name first.
+    Returns the browser_download_url or raises on failure.
     """
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        return False, "GITHUB_TOKEN or GITHUB_REPO not configured."
+    import urllib.parse
 
-    rel = _get_or_create_release()
-    if not rel:
-        return False, "Failed to get or create the GitHub Release."
-
-    release_id = rel["id"]
-
-    # Delete any existing asset with the same filename
+    # Delete existing asset with same name
     assets = _gh_api(f"/releases/{release_id}/assets") or []
     for asset in assets:
-        if isinstance(asset, dict) and asset.get("name") == original_filename:
+        if isinstance(asset, dict) and asset.get("name") == filename:
             _gh_api(f"/assets/{asset['id']}", method="DELETE")
-            print(f"[GH] Deleted old asset '{original_filename}' id={asset['id']}", flush=True)
+            print(f"[GH] Deleted old asset '{filename}'", flush=True)
             break
 
-    upload_url = rel.get("upload_url", "").split("{")[0]
+    rel = _gh_api(f"/releases/{release_id}")
+    upload_url = (rel or {}).get("upload_url", "").split("{")[0]
     if not upload_url:
-        return False, "Release has no upload_url."
+        raise RuntimeError("No upload_url on release.")
 
-    import urllib.parse
-    upload_full = f"{upload_url}?name={urllib.parse.quote(original_filename)}"
+    upload_full = f"{upload_url}?name={urllib.parse.quote(filename)}"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Content-Type":  "application/octet-stream",
         "Accept":        "application/vnd.github+json",
         "User-Agent":    "ImperiumBot/1.0",
     }
-    req = urllib.request.Request(upload_full, data=dll_bytes, headers=headers, method="POST")
+    req = urllib.request.Request(upload_full, data=file_bytes, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            asset_info = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            info = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", errors="replace")
-        return False, f"Upload failed (HTTP {e.code}): {err[:200]}"
+        raise RuntimeError(f"Upload HTTP {e.code}: {err[:200]}")
+
+    url = info.get("browser_download_url", "")
+    if not url:
+        raise RuntimeError("No browser_download_url in response.")
+    return url
+
+
+def upload_product_file(slug: str, filename: str, file_bytes: bytes) -> tuple[bool, str]:
+    """
+    Upload a file for a product slug to GitHub Releases.
+    Uses tag  imperium-product-<slug>  so each product has its own release.
+    Updates the global product URL in the Gist.
+    Returns (success, download_url_or_error).
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN or GITHUB_REPO not configured."
+
+    tag  = f"imperium-product-{slug}"
+    name = f"Imperium — {slug} (managed by bot)"
+    rel  = _get_or_create_release(tag, name)
+    if not rel:
+        return False, "Failed to get or create GitHub Release."
+
+    try:
+        url = _upload_asset(rel["id"], filename, file_bytes)
     except Exception as ex:
-        return False, f"Upload error: {ex}"
+        return False, str(ex)
 
-    download_url = asset_info.get("browser_download_url", "")
-    if not download_url:
-        return False, "Upload succeeded but no download URL returned."
-
-    # Save as hookloader_dll_url (separate from product catalogue)
+    # Persist URL
     data = _load()
-    data["hookloader_dll_url"] = download_url
+    if "products" not in data:
+        data["products"] = DEFAULT_PRODUCTS.copy()
+    if slug not in data["products"]:
+        data["products"][slug] = {"display_name": slug, "url": ""}
+    data["products"][slug]["url"] = url
     _save(data)
 
-    print(f"[GH] Uploaded '{original_filename}': {download_url}", flush=True)
-    return True, download_url
+    print(f"[GH] product '{slug}' → {url}", flush=True)
+    return True, url
+
+
+def upload_hookloader_dll(dll_bytes: bytes, original_filename: str = "private.dll") -> tuple[bool, str]:
+    """
+    Upload the hookloader DLL to the hookloader-dll release.
+    Preserves the original filename (no renaming).
+    Updates hookloader_dll_url in the Gist.
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False, "GITHUB_TOKEN or GITHUB_REPO not configured."
+
+    rel = _get_or_create_release(_RELEASE_TAG, _RELEASE_NAME)
+    if not rel:
+        return False, "Failed to get or create the GitHub Release."
+
+    try:
+        url = _upload_asset(rel["id"], original_filename, dll_bytes)
+    except Exception as ex:
+        return False, str(ex)
+
+    data = _load()
+    data["hookloader_dll_url"] = url
+    _save(data)
+
+    print(f"[GH] DLL '{original_filename}' → {url}", flush=True)
+    return True, url

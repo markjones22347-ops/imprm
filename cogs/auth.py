@@ -31,7 +31,7 @@ from cogs.database import (
     disable_key, enable_key, delete_key, delete_keys,
     update_key, register_key, reset_hwid, key_exists,
     get_all_products, upsert_product, delete_product, set_product_global_url,
-    upload_hookloader_dll,
+    upload_hookloader_dll, upload_product_file,
 )
 
 # ─── Role IDs ─────────────────────────────────────────────────────────────────
@@ -125,6 +125,10 @@ class HookloaderUrlModal(ui.Modal, title="Set Hookloader DLL URL"):
         )
 
 
+# channel_id → (user_id, slug) for pending product file uploads
+_pending_product_uploads: dict[int, tuple[int, str]] = {}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  /setdownload — product download management panel
 # ══════════════════════════════════════════════════════════════════════════════
@@ -145,6 +149,14 @@ class DownloadPanelView(ui.View):
             color=0x1E90FF,
         ).set_footer(text="Imperium Bot — Download Management")
 
+    @ui.button(label="⬆️  Upload File", style=discord.ButtonStyle.success, row=0)
+    async def upload_file(self, interaction: discord.Interaction, button: ui.Button):
+        products = get_all_products()
+        if not products:
+            await interaction.response.send_message("No products yet. Add one first.", ephemeral=True)
+            return
+        await interaction.response.send_modal(UploadProductFileModal(interaction.channel_id, interaction.user.id))
+
     @ui.button(label="✏️  Edit Link", style=discord.ButtonStyle.primary, row=0)
     async def edit_link(self, interaction: discord.Interaction, button: ui.Button):
         products = get_all_products()
@@ -153,11 +165,11 @@ class DownloadPanelView(ui.View):
             return
         await interaction.response.send_modal(EditProductLinkModal(list(products.keys())))
 
-    @ui.button(label="➕  Add Product", style=discord.ButtonStyle.success, row=0)
+    @ui.button(label="➕  Add Product", style=discord.ButtonStyle.primary, row=1)
     async def add_product(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(AddProductModal())
 
-    @ui.button(label="🗑️  Remove Product", style=discord.ButtonStyle.danger, row=0)
+    @ui.button(label="🗑️  Remove Product", style=discord.ButtonStyle.danger, row=1)
     async def remove_product_btn(self, interaction: discord.Interaction, button: ui.Button):
         products = get_all_products()
         if not products:
@@ -165,9 +177,42 @@ class DownloadPanelView(ui.View):
             return
         await interaction.response.send_modal(RemoveProductModal(list(products.keys())))
 
-    @ui.button(label="🔄  Refresh", style=discord.ButtonStyle.secondary, row=0)
+    @ui.button(label="🔄  Refresh", style=discord.ButtonStyle.secondary, row=1)
     async def refresh(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.edit_message(embed=self._embed(), view=self)
+
+
+class UploadProductFileModal(ui.Modal, title="Upload Product File — Step 1"):
+    """Ask which product slug, then wait for file attachment."""
+    def __init__(self, channel_id: int, user_id: int):
+        super().__init__()
+        self._channel_id = channel_id
+        self._user_id    = user_id
+        products = get_all_products()
+        hint = " | ".join(list(products.keys())[:8]) or "e.g. emu"
+        self.slug_input = ui.TextInput(
+            label="Product slug to upload for",
+            placeholder=hint,
+            style=discord.TextStyle.short,
+            max_length=50,
+        )
+        self.add_item(self.slug_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        slug = self.slug_input.value.strip().lower()
+        products = get_all_products()
+        if slug not in products:
+            await interaction.response.send_message(
+                f"❌ Product `{slug}` not found. Add it first with **Add Product**.",
+                ephemeral=True,
+            )
+            return
+        _pending_product_uploads[self._channel_id] = (self._user_id, slug)
+        await interaction.response.send_message(
+            f"📎 Send the file for **{products[slug].get('display_name', slug)}** (`{slug}`) "
+            f"as an attachment in this channel now. Any file type accepted.",
+            ephemeral=True,
+        )
 
 
 class EditProductLinkModal(ui.Modal, title="Edit Product Download Link"):
@@ -751,60 +796,81 @@ class AuthCog(commands.Cog):
     async def register(self, interaction: discord.Interaction):
         await interaction.response.send_modal(RegisterModal())
 
-    # ── on_message — picks up .dll file uploads ───────────────────────────────
+    # ── on_message — picks up .dll/.exe file uploads ─────────────────────────
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Ignore bots
         if message.author.bot:
             return
 
         channel_id = message.channel.id
-        if channel_id not in _pending_dll_uploads:
-            return
 
-        # Only accept from the user who triggered the command
-        expected_user_id = _pending_dll_uploads[channel_id]
-        if message.author.id != expected_user_id:
-            return
-
-        # Look for any .dll or .exe attachment
-        dll_attachment = next(
-            (a for a in message.attachments
-             if a.filename.lower().endswith(('.dll', '.exe'))),
-            None,
-        )
-        if not dll_attachment:
-            return
-
-        del _pending_dll_uploads[channel_id]
-
-        status_msg = await message.reply(
-            f"⏳ Uploading `{dll_attachment.filename}` to GitHub Releases…"
-        )
-
-        try:
-            dll_bytes = await dll_attachment.read()
-        except Exception as e:
-            await status_msg.edit(content=f"❌ Failed to read attachment: {e}")
-            return
-
-        loop = asyncio.get_event_loop()
-        # Pass original filename so it isn't renamed
-        success, result = await loop.run_in_executor(
-            None, lambda: upload_hookloader_dll(dll_bytes, dll_attachment.filename)
-        )
-
-        if success:
-            await status_msg.edit(
-                content=(
-                    f"✅ DLL uploaded successfully!\n"
-                    f"**Download URL:** <{result}>\n"
-                    f"The `private` product URL has been updated. "
-                    f"All keys with the `private` product assigned will get the new DLL on next launch."
+        # ── Hookloader DLL upload ─────────────────────────────────────────────
+        if channel_id in _pending_dll_uploads:
+            if message.author.id != _pending_dll_uploads[channel_id]:
+                pass
+            else:
+                dll_attachment = next(
+                    (a for a in message.attachments
+                     if a.filename.lower().endswith(('.dll', '.exe'))),
+                    None,
                 )
+                if dll_attachment:
+                    del _pending_dll_uploads[channel_id]
+                    status_msg = await message.reply(
+                        f"⏳ Uploading `{dll_attachment.filename}` to GitHub Releases…"
+                    )
+                    try:
+                        dll_bytes = await dll_attachment.read()
+                    except Exception as e:
+                        await status_msg.edit(content=f"❌ Failed to read attachment: {e}")
+                        return
+                    loop = asyncio.get_event_loop()
+                    success, result = await loop.run_in_executor(
+                        None, lambda: upload_hookloader_dll(dll_bytes, dll_attachment.filename)
+                    )
+                    if success:
+                        await status_msg.edit(content=(
+                            f"✅ DLL uploaded!\n**URL:** <{result}>\n"
+                            f"The `private` product URL has been updated."
+                        ))
+                    else:
+                        await status_msg.edit(content=f"❌ Upload failed: {result}")
+                    return
+
+        # ── Product file upload ───────────────────────────────────────────────
+        if channel_id in _pending_product_uploads:
+            user_id, slug = _pending_product_uploads[channel_id]
+            if message.author.id != user_id:
+                return
+            if not message.attachments:
+                return
+
+            attachment = message.attachments[0]
+            del _pending_product_uploads[channel_id]
+
+            products = get_all_products()
+            display  = products.get(slug, {}).get("display_name", slug)
+
+            status_msg = await message.reply(
+                f"⏳ Uploading `{attachment.filename}` for **{display}** to GitHub Releases…"
             )
-        else:
-            await status_msg.edit(content=f"❌ Upload failed: {result}")
+            try:
+                file_bytes = await attachment.read()
+            except Exception as e:
+                await status_msg.edit(content=f"❌ Failed to read attachment: {e}")
+                return
+
+            loop = asyncio.get_event_loop()
+            success, result = await loop.run_in_executor(
+                None, lambda: upload_product_file(slug, attachment.filename, file_bytes)
+            )
+            if success:
+                await status_msg.edit(content=(
+                    f"✅ **{display}** uploaded!\n**URL:** <{result}>\n"
+                    f"Product catalogue updated — all keys with `{slug}` will get this file."
+                ))
+            else:
+                await status_msg.edit(content=f"❌ Upload failed: {result}")
 
 
 async def setup(bot: commands.Bot):
