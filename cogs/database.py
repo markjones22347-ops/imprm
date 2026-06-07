@@ -462,10 +462,19 @@ def _gh_api(path: str, method: str = "GET",
 
 
 def _get_or_create_release(tag: str, name: str) -> dict | None:
-    """Return a Release object for the given tag, creating it if needed."""
+    """
+    Return a Release object for the given tag.
+    If a release with this tag already exists, delete it and create a new one (auto-replace).
+    """
     rel = _gh_api(f"/releases/tags/{tag}")
     if rel and "id" in rel:
-        return rel
+        # Release exists - delete it first to auto-replace
+        print(f"[GH] Auto-replacing existing release tag={tag} id={rel['id']}", flush=True)
+        _gh_api(f"/releases/{rel['id']}", method="DELETE")
+        # Also delete the tag
+        _gh_api(f"/git/refs/tags/{tag}", method="DELETE")
+    
+    # Create new release
     payload = json.dumps({
         "tag_name":   tag,
         "name":       name,
